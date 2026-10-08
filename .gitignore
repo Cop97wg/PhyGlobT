@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+
+# Demo assets (small enough to ship in-repo: 5 checkpoints ≈ 24 MB, 17 scenes ≈ 14 MB)
+# Kept in git so a clone is immediately runnable. Add new large files via Git LFS.
+
+# Frontend
+web/node_modules/
+web/dist/
+
+# IDE / OS / build artifacts
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+*.log
+temp/
+.playwright-mcp

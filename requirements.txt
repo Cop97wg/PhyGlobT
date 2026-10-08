@@ -1,0 +1,15 @@
+# PhyGlobT training/evaluation
+torch>=2.0
+numpy>=1.24
+scipy>=1.10
+scikit-learn>=1.3
+
+# Visualization backend (server/)
+fastapi>=0.110
+uvicorn[standard]>=0.29
+pydantic>=2.5
+python-multipart>=0.0.9  # required by FastAPI's UploadFile (scene upload endpoint)
+
+# Development / testing
+pytest>=8.0
+httpx>=0.27

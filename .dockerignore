@@ -1,0 +1,19 @@
+# Keep the build context small; the image bundles only code + demo assets.
+.git
+.gitignore
+.pytest_cache
+.playwright-mcp
+temp
+**/__pycache__
+**/*.pyc
+*.log
+
+# Frontend sources are rebuilt inside the image (stage 1)
+web/node_modules
+web/dist
+web/*.log
+
+# Local artifacts not needed at runtime
+data/README.md
+LICENSE
+README.md
