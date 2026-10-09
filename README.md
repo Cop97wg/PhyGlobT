@@ -14,6 +14,10 @@ track-to-track association. It encodes kinematics residuals from the constant-ve
 (CV) motion model, models global inter-track topology with a Transformer, and performs
 differentiably optimal assignment with an unbalanced Sinkhorn layer.
 
+![PhyGlobT visualization demo](docs/phyglobt_screenshot.png)
+
+*The interactive visualization toolkit: dual-radar tracks (Sensor A in blue, Sensor B in red) on a satellite basemap with detection-range circles, ground-truth pair endpoints (gray), and PhyGlobT's predicted associations (green/orange rings). The left panel provides scene browsing, tunable radar re-simulation, and model selection; the bottom panel reports Overall F1, precision, recall, and runtime.*
+
 ## Core components
 
 | Module | Role |
