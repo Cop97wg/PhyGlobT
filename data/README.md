@@ -1,10 +1,13 @@
 # Data Sources
 
 PhyGlobT is trained and evaluated on **real AIS vessel trajectories** from two open
-data portals. Raw AIS messages are converted to radar-like observations through the
-IMO noise model `MSC.192(79)` (radial/azimuthal range-dependent errors). The resulting
-scene files (`.npy`) are not redistributed here due to size (~GBs), but can be
-regenerated with the scripts in `../phyglobt/preprocessing.py` and `../phyglobt/dataset.py`.
+data portals. Raw AIS messages are converted to radar-like observations through a
+range-dependent radar error model (Table III of the paper: σρ = 5/10/15 m and
+σθ = 0.3/0.4/0.5° at the 10 km reference range, scaling as (r/10 km)^0.8; drop
+rates 5/10/15 %; 5 s antenna sweeps with ±2 s sensor asynchrony). A curated set of
+17 example scenes is included in `data/scenes/`; the full corpus (~GBs) is not
+redistributed, but can be regenerated with the scripts in
+`../phyglobt/preprocessing.py` and `../phyglobt/dataset.py`.
 
 | Domain | Region | Source | Download link |
 |---|---|---|---|

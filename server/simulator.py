@@ -7,16 +7,16 @@ preserved, so track ids and ground-truth pairs stay valid — only the point set
 change. This makes "what-if" evaluation possible: run the same models on the
 same ships under a different radar error model.
 
-Noise model (mirrors the original generator, see ``radar_sim.json``):
+Noise model (mirrors the paper's Table III configuration):
 
     σρ = sigma_rho_m · (r / noise_ref_m)^noise_exponent    (capped at noise_cap×)
     σθ = sigma_theta_deg · (r / noise_ref_m)^noise_exponent
 
 Range (radial) and azimuth (tangential) errors are drawn independently per
-plot. Each radar samples its own sweep grid (``sweep_interval_s``) with a
-random ±``async_jitter_s`` offset; a sweep yields a plot with probability
-``detection_rate`` (the original generator's effective detection is
-1 − (1 − Pd·(1−drop)) ≈ 0.68). Points beyond the sensor's max range are gated.
+plot. Each radar samples its own 5 s sweep grid (12 rpm) with a random
+±``async_jitter_s`` offset; a sweep yields a plot with probability
+``detection_rate`` (the paper's per-tier drop rates 5/10/15% correspond to
+detection rates 0.95/0.90/0.85). Points beyond the sensor's max range are gated.
 
 Coordinates follow the same convention as ``scenes.load_scene``: observations
 and truth are LOCAL degree offsets from the grid corner (absolute WGS84 inputs
@@ -38,13 +38,13 @@ _M_PER_DEG_LAT = 111320.0
 
 @dataclass
 class SimParams:
-    sigma_rho_m: float = 30.0        # range noise at noise_ref_m
-    sigma_theta_deg: float = 0.5     # azimuth noise at noise_ref_m
+    sigma_rho_m: float = 15.0        # range noise at noise_ref_m (Hard tier)
+    sigma_theta_deg: float = 0.5     # azimuth noise at noise_ref_m (Hard tier)
     noise_exponent: float = 0.8      # σ ∝ (r / ref)^exponent
     noise_ref_m: float = 10000.0     # reference range
     noise_cap: float = 4.0           # max multiplier of the base σ
-    detection_rate: float = 0.68     # P(sweep yields a plot); 1.0 = no misses
-    sweep_interval_s: float = 10.0   # antenna period (6 rpm ≙ 10 s)
+    detection_rate: float = 0.85     # P(sweep yields a plot); 1.0 = no misses
+    sweep_interval_s: float = 5.0    # antenna period (12 rpm ≙ 5 s)
     async_jitter_s: float = 2.0      # ± random sweep offset per sensor
     sensor_range_a_m: float | None = None  # None → keep metadata max_range
     sensor_range_b_m: float | None = None
@@ -63,13 +63,13 @@ def parse_sim_params(d: dict | None) -> SimParams:
             v = default
         return min(max(v, lo), hi)
 
-    p.sigma_rho_m = _num("sigma_rho_m", 30.0, 0.0, 1000.0)
+    p.sigma_rho_m = _num("sigma_rho_m", 15.0, 0.0, 1000.0)
     p.sigma_theta_deg = _num("sigma_theta_deg", 0.5, 0.0, 10.0)
     p.noise_exponent = _num("noise_exponent", 0.8, 0.0, 2.0)
     p.noise_ref_m = _num("noise_ref_m", 10000.0, 100.0, 100000.0)
     p.noise_cap = _num("noise_cap", 4.0, 1.0, 10.0)
-    p.detection_rate = _num("detection_rate", 0.68, 0.01, 1.0)
-    p.sweep_interval_s = _num("sweep_interval_s", 10.0, 1.0, 120.0)
+    p.detection_rate = _num("detection_rate", 0.85, 0.01, 1.0)
+    p.sweep_interval_s = _num("sweep_interval_s", 5.0, 1.0, 120.0)
     p.async_jitter_s = _num("async_jitter_s", 2.0, 0.0, 30.0)
 
     def _opt_range(key: str) -> float | None:

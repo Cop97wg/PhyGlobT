@@ -8,15 +8,15 @@ interface Props {
   onSimulated: (name: string) => void;
 }
 
-/** Defaults mirror the original generator (radar_sim.json). */
+/** Defaults follow the paper's Hard-level configuration (Table III). */
 const DEFAULTS: SimParams = {
-  sigma_rho_m: 30,
+  sigma_rho_m: 15,
   sigma_theta_deg: 0.5,
   noise_exponent: 0.8,
   noise_ref_m: 10000,
   noise_cap: 4,
-  detection_rate: 0.68,
-  sweep_interval_s: 10,
+  detection_rate: 0.85,
+  sweep_interval_s: 5,
   async_jitter_s: 2,
   sensor_range_a_m: null,
   sensor_range_b_m: null,
@@ -25,9 +25,19 @@ const DEFAULTS: SimParams = {
 
 const PRESETS: { id: string; label: string; patch: Partial<SimParams> }[] = [
   {
-    id: 'generator',
-    label: 'Generator default (σρ 30 m · det 68% · 10 s sweep)',
-    patch: { sigma_rho_m: 30, sigma_theta_deg: 0.5, noise_exponent: 0.8, detection_rate: 0.68, sweep_interval_s: 10, async_jitter_s: 2 },
+    id: 'easy',
+    label: 'Easy (σρ 5 m · σθ 0.3° · drop 5%)',
+    patch: { sigma_rho_m: 5, sigma_theta_deg: 0.3, detection_rate: 0.95, sweep_interval_s: 5, async_jitter_s: 2 },
+  },
+  {
+    id: 'medium',
+    label: 'Medium (σρ 10 m · σθ 0.4° · drop 10%)',
+    patch: { sigma_rho_m: 10, sigma_theta_deg: 0.4, detection_rate: 0.90, sweep_interval_s: 5, async_jitter_s: 2 },
+  },
+  {
+    id: 'hard',
+    label: 'Hard (σρ 15 m · σθ 0.5° · drop 15%)',
+    patch: { sigma_rho_m: 15, sigma_theta_deg: 0.5, detection_rate: 0.85, sweep_interval_s: 5, async_jitter_s: 2 },
   },
   {
     id: 'clean',
@@ -36,19 +46,14 @@ const PRESETS: { id: string; label: string; patch: Partial<SimParams> }[] = [
   },
   {
     id: 'noisy',
-    label: 'High noise (σρ 60 m · det 50% · ±3 s)',
-    patch: { sigma_rho_m: 60, sigma_theta_deg: 1.0, detection_rate: 0.5, sweep_interval_s: 12, async_jitter_s: 3 },
-  },
-  {
-    id: 'dense',
-    label: 'Fast scan (12 rpm · det 85%)',
-    patch: { sigma_rho_m: 30, sigma_theta_deg: 0.5, detection_rate: 0.85, sweep_interval_s: 5, async_jitter_s: 1 },
+    label: 'High noise (σρ 30 m · det 50% · ±3 s)',
+    patch: { sigma_rho_m: 30, sigma_theta_deg: 0.8, detection_rate: 0.5, sweep_interval_s: 5, async_jitter_s: 3 },
   },
 ];
 
 export default function SimPanel({ scene, onSimulated }: Props) {
   const [p, setP] = useState<SimParams>(DEFAULTS);
-  const [preset, setPreset] = useState('generator');
+  const [preset, setPreset] = useState('hard');
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -89,7 +94,7 @@ export default function SimPanel({ scene, onSimulated }: Props) {
   const rangeB = scene?.sensors?.find((s) => s.id === 2)?.max_range_m ?? null;
 
   async function run() {
-    if (!scene || scene.simulated) return;
+    if (!scene) return;
     setBusy(true);
     setErr(null);
     setMsg(null);
@@ -143,8 +148,8 @@ export default function SimPanel({ scene, onSimulated }: Props) {
       <div className="sim-grid">
         {numField('σρ (m @10 km)', 'sigma_rho_m', 5, 'Range-noise level at the reference range')}
         {numField('σθ (° @10 km)', 'sigma_theta_deg', 0.05, 'Azimuth-noise level at the reference range')}
-        {numField('Detection rate', 'detection_rate', 0.01, 'P(a sweep yields a plot); 0.68 ≙ Pd 0.85 × (1−drop 0.2)')}
-        {numField('Sweep interval (s)', 'sweep_interval_s', 1, 'Antenna period: 10 s ≙ 6 rpm, 5 s ≙ 12 rpm')}
+        {numField('Detection rate', 'detection_rate', 0.01, 'P(a sweep yields a plot); 0.85 ≙ 15% drop (Hard tier, Table III)')}
+        {numField('Sweep interval (s)', 'sweep_interval_s', 1, 'Antenna period: 5 s ≙ 12 rpm')}
         {numField('Async jitter (±s)', 'async_jitter_s', 0.5, 'Random sweep-offset between the two radars')}
         {numField('Seed (0 = random)', 'seed', 1, 'Fix a seed for reproducible simulations')}
         {rangeField('Sensor A range', 'sensor_range_a_m', rangeA)}

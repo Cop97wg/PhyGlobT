@@ -124,20 +124,20 @@ def _density_of(scene) -> str:
 # ── Sensor + error-model helpers ──────────────────────────────────────
 _M_PER_DEG_LAT = 111320.0
 
-# Radar noise model parameters — ACTUAL generator config (radar_sim.json),
-# empirically verified against the shipped scenes by radial/tangential
-# decomposition (measured σρ 22.7/42.0/59.2/80.1 m vs configured
-# 22.6/40.8/56.7/80.9 m across range bins). The noise is range-dependent:
-#   σρ = 30 m · (r/10 km)^0.8,  σθ = 0.5° · (r/10 km)^0.8   (capped at 4×)
-# Effective miss rate = 1 − Pd·(1−drop) = 1 − 0.85·0.8 ≈ 0.32 (measured 0.318).
-# Difficulty levels differ in TARGET DENSITY only, not in sensor noise.
+# Radar noise model parameters — mirror the paper's Table III configuration.
+# The noise is range-dependent, so a single σ value is quoted at the 10 km
+# reference range and scales with (r/10 km)^0.8 (capped at 4×):
+#   σρ = σρ0 · (r/10 km)^0.8,  σθ = σθ0 · (r/10 km)^0.8
+# Antenna sweep: 5 s (12 rpm); the two sensors are asynchronous by ±2 s.
+# Difficulty tiers differ in BOTH target density and sensor accuracy, exactly
+# as in the paper: Easy (50–100 tracks), Medium (100–200), Hard (>200).
 _DIFFICULTY_ERR = {
-    "50_100": {"difficulty": "Easy", "sigma_rho_m": 30.0, "sigma_theta_deg": 0.5,
-               "drop_rate": 0.32, "window_overlap": 0.9},
-    "100_200": {"difficulty": "Medium", "sigma_rho_m": 30.0, "sigma_theta_deg": 0.5,
-                "drop_rate": 0.32, "window_overlap": 0.7},
-    "200_plus": {"difficulty": "Hard", "sigma_rho_m": 30.0, "sigma_theta_deg": 0.5,
-                 "drop_rate": 0.32, "window_overlap": 0.5},
+    "50_100": {"difficulty": "Easy", "sigma_rho_m": 5.0, "sigma_theta_deg": 0.3,
+               "drop_rate": 0.05, "window_overlap": 0.9},
+    "100_200": {"difficulty": "Medium", "sigma_rho_m": 10.0, "sigma_theta_deg": 0.4,
+                "drop_rate": 0.10, "window_overlap": 0.7},
+    "200_plus": {"difficulty": "Hard", "sigma_rho_m": 15.0, "sigma_theta_deg": 0.5,
+                 "drop_rate": 0.15, "window_overlap": 0.5},
 }
 
 
@@ -174,23 +174,23 @@ def _sensor_info(scene) -> list[dict[str, Any]]:
 
 def _error_model(scene) -> dict[str, Any] | None:
     """Radar noise parameters — user sim params take precedence, then the
-    generator defaults for the scene's difficulty tier."""
+    paper's Table III configuration for the scene's difficulty tier."""
     sim = scene.metadata.get("sim_params")
     if isinstance(sim, dict):
         return {
             "difficulty": "Simulated",
-            "sigma_rho_m": float(sim.get("sigma_rho_m", 30.0)),
+            "sigma_rho_m": float(sim.get("sigma_rho_m", 15.0)),
             "sigma_theta_deg": float(sim.get("sigma_theta_deg", 0.5)),
-            "drop_rate": round(1.0 - float(sim.get("detection_rate", 0.68)), 3),
+            "drop_rate": round(1.0 - float(sim.get("detection_rate", 0.85)), 3),
             "window_overlap": None,
             "source": "user-configured re-simulation: σρ={:.0f} m·(r/{} km)^{}, σθ={:.2f}°, "
                       "detection {:.0%}, sweep {:.0f} s, async ±{:.0f} s".format(
-                          float(sim.get("sigma_rho_m", 30.0)),
+                          float(sim.get("sigma_rho_m", 15.0)),
                           float(sim.get("noise_ref_m", 10000.0)) / 1000.0,
                           float(sim.get("noise_exponent", 0.8)),
                           float(sim.get("sigma_theta_deg", 0.5)),
-                          float(sim.get("detection_rate", 0.68)),
-                          float(sim.get("sweep_interval_s", 10.0)),
+                          float(sim.get("detection_rate", 0.85)),
+                          float(sim.get("sweep_interval_s", 5.0)),
                           float(sim.get("async_jitter_s", 2.0))),
         }
     density = _density_of(scene)
@@ -199,8 +199,11 @@ def _error_model(scene) -> dict[str, Any] | None:
         return None
     return {
         **cfg,
-        "source": "generator config (radar_sim.json): σρ=30 m·(r/10km)^0.8, σθ=0.5°·(r/10km)^0.8, "
-                  "Pd=0.85, drop=0.2 → effective miss ≈0.32; sweep 10 s (6 rpm); async ±2 s",
+        "source": "paper Table III target model for this tier: σρ={:.0f} m·(r/10km)^0.8, "
+                  "σθ={:.1f}°·(r/10km)^0.8, drop {:.0%}; sweep 5 s (12 rpm); async ±2 s. "
+                  "Bundled scenes were generated with an earlier 10 s (6 rpm) sweep — "
+                  "re-simulate to apply this model exactly".format(
+                      cfg["sigma_rho_m"], cfg["sigma_theta_deg"], cfg["drop_rate"]),
     }
 
 
@@ -434,8 +437,18 @@ def simulate_scene_endpoint(req: SimulateRequest) -> dict[str, Any]:
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Cannot read scene file: {exc}")
 
-    params = parse_sim_params(req.params)
     base = load_scene(path)  # for the GT pair list (ids are preserved)
+    # Default to the paper's Table III parameters for this scene's difficulty
+    # tier; any explicitly supplied value overrides the tier default.
+    tier = _DIFFICULTY_ERR.get(_density_of(base), _DIFFICULTY_ERR["200_plus"])
+    defaults = {
+        "sigma_rho_m": tier["sigma_rho_m"],
+        "sigma_theta_deg": tier["sigma_theta_deg"],
+        "detection_rate": 1.0 - tier["drop_rate"],
+        "sweep_interval_s": 5.0,
+        "async_jitter_s": 2.0,
+    }
+    params = parse_sim_params({**defaults, **(req.params or {})})
     _SIM_COUNTER["n"] += 1
     base_tag = base_name[:-4] if base_name.endswith(".npy") else base_name
     sim_name = f"sim_{_SIM_COUNTER['n']:03d}_{base_tag}.npy"

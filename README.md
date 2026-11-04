@@ -103,9 +103,13 @@ The web UI walks through five panels:
 Raw AIS trajectories come from two open sources (see `data/README.md`):
 NOAA **MarineCadastre** (US) and the **Danish Maritime Authority** (Denmark/Baltic).
 They are converted to dual-radar observations with a range-dependent error model
-(σρ = 30 m·(r/10 km)^0.8, σθ = 0.5°·(r/10 km)^0.8, capped at 4×; detection
-Pd = 0.85 with a 20 % track-drop; 10 s antenna sweeps, ±2 s sensor asynchrony)
-and packed into scene `.npy` files:
+matching the three dataset tiers of the paper (Table III): σρ = 5/10/15 m and
+σθ = 0.3/0.4/0.5° at the 10 km reference range, scaling as (r/10 km)^0.8 and
+capped at 4×; drop rates 5/10/15 %; 5 s antenna sweeps (12 rpm) with ±2 s sensor
+asynchrony. The bundled example scenes were produced with an earlier 10 s
+(6 rpm) sweep setting and are shipped as-is — the interactive simulator panel
+re-renders them with the current 5 s configuration. Scenes are packed into
+`.npy` files:
 
 ```bash
 python -m phyglobt.preprocessing --ais_dir <raw_ais> --out_dir data/scenes --domain US
