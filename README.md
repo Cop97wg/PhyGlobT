@@ -39,7 +39,7 @@ differentiably optimal assignment with an unbalanced Sinkhorn layer.
 ```
 .
 ├── data/            # data-source instructions + download links (README.md)
-├── phyglobt/        # model & training code (portable subset of the paper implementation)
+├── phyglobt/        # reference implementation of the paper's model and training pipeline
 ├── server/          # FastAPI visualization backend (scene loading, inference, metrics)
 ├── web/             # React + MapLibre visualization frontend
 ├── checkpoints/     # pretrained weights (5 checkpoints, ~24 MB, shipped in-repo)
@@ -146,6 +146,7 @@ proxy (nginx / Caddy / Traefik) at `:7860` and add TLS.
 
 Released under the MIT License. See `LICENSE`.
 
-Data redistribution note: scene `.npy` files are derived from third-party AIS data
-(MarineCadastre / DMA) and are **not** redistributed here; download them from the
-official portals linked in `data/README.md`.
+Data redistribution note: the 17 bundled example scenes are derived from third-party
+AIS data (MarineCadastre / DMA). The full 2,000-scenario corpus is **not** redistributed;
+download the raw AIS data from the official portals linked in `data/README.md` and
+regenerate scenes with the preprocessing scripts.
