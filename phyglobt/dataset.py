@@ -25,7 +25,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader, Dataset
 
-from .preprocessing import preprocess_trajectory_unified
+from .preprocessing import metric_preprocess, preprocess_trajectory_unified
 
 
 class CrossSensorTrajectoryDataset(Dataset):
@@ -41,7 +41,7 @@ class CrossSensorTrajectoryDataset(Dataset):
                  sparsify=True, max_time_gap=1800, max_distance=10.0,
                  mask_augment=False, mask_times=1, mask_trajectory_ratio=0.3,
                  random_seed=42, train_ratio=0.7, test_ratio=0.15,
-                 lazy_load=True, max_samples=None):
+                 lazy_load=True, max_samples=None, feature_mode="legacy"):
         self.data_folder = data_folder
         self.mode = mode
         self.max_trajectories = max_trajectories
@@ -58,6 +58,7 @@ class CrossSensorTrajectoryDataset(Dataset):
         self.test_ratio = test_ratio
         self.lazy_load = lazy_load
         self.max_samples = max_samples
+        self.feature_mode = feature_mode
 
         np.random.seed(random_seed)
 
@@ -128,7 +129,18 @@ class CrossSensorTrajectoryDataset(Dataset):
                 print(f"Error loading {fp}: {e}")
         return scenarios
 
-    def _preprocess_trajectory(self, trajectory, return_timestamps=False):
+    def _preprocess_trajectory(self, trajectory, return_timestamps=False,
+                               ref_lat=None, ref_lon=None):
+        if self.feature_mode == "metric":
+            if return_timestamps:
+                return metric_preprocess(
+                    trajectory, self.time_steps, self.use_interpolation,
+                    return_original_times=True, ref_lat=ref_lat, ref_lon=ref_lon
+                )
+            return metric_preprocess(
+                trajectory, self.time_steps, self.use_interpolation,
+                ref_lat=ref_lat, ref_lon=ref_lon
+            )
         if return_timestamps:
             processed_traj, timestamps = preprocess_trajectory_unified(
                 trajectory, self.time_steps, self.use_interpolation, return_original_times=True
@@ -158,6 +170,19 @@ class CrossSensorTrajectoryDataset(Dataset):
         observations = scenario.get("observations", [])
         segment_info = scenario.get("segment_info", [])
 
+        # Scene-level metric reference shared by every track (keeps absolute
+        # geometry, so the Phy-KRE residuals are in real metres).
+        ref_lat, ref_lon = None, None
+        if self.feature_mode == "metric":
+            meta = scenario.get("metadata", {}) or {}
+            ref_lat = meta.get("lat_center")
+            ref_lon = meta.get("lon_center")
+            if ref_lat is None or ref_lon is None:
+                first = [obs[0] for obs in observations if len(obs) > 0]
+                if first:
+                    first = np.asarray(first, dtype=float)
+                    ref_lat, ref_lon = float(first[:, 0].mean()), float(first[:, 1].mean())
+
         sensor1_trajs, sensor2_trajs = [], []
         sensor1_info, sensor2_info = [], []
 
@@ -167,18 +192,20 @@ class CrossSensorTrajectoryDataset(Dataset):
             sensor_id = segment_info[i].get("sensor_id", -1)
             if sensor_id == 1:
                 if self.sparsify:
-                    proc, tstamp = self._preprocess_trajectory(traj, return_timestamps=True)
+                    proc, tstamp = self._preprocess_trajectory(
+                        traj, return_timestamps=True, ref_lat=ref_lat, ref_lon=ref_lon)
                     sensor1_trajs.append((proc, tstamp))
                 else:
-                    proc = self._preprocess_trajectory(traj)
+                    proc = self._preprocess_trajectory(traj, ref_lat=ref_lat, ref_lon=ref_lon)
                     sensor1_trajs.append((proc, None))
                 sensor1_info.append(segment_info[i])
             elif sensor_id == 2:
                 if self.sparsify:
-                    proc, tstamp = self._preprocess_trajectory(traj, return_timestamps=True)
+                    proc, tstamp = self._preprocess_trajectory(
+                        traj, return_timestamps=True, ref_lat=ref_lat, ref_lon=ref_lon)
                     sensor2_trajs.append((proc, tstamp))
                 else:
-                    proc = self._preprocess_trajectory(traj)
+                    proc = self._preprocess_trajectory(traj, ref_lat=ref_lat, ref_lon=ref_lon)
                     sensor2_trajs.append((proc, None))
                 sensor2_info.append(segment_info[i])
 
@@ -338,6 +365,7 @@ def create_data_loaders(data_folder, config):
         random_seed=config.get("random_seed", 42),
         train_ratio=config.get("train_ratio", 0.7),
         test_ratio=config.get("test_ratio", 0.15),
+        feature_mode=config.get("feature_mode", "legacy"),
     )
     val_dataset = CrossSensorTrajectoryDataset(
         data_folder=data_folder, mode="val",
@@ -351,6 +379,7 @@ def create_data_loaders(data_folder, config):
         random_seed=config.get("random_seed", 42),
         train_ratio=config.get("train_ratio", 0.7),
         test_ratio=config.get("test_ratio", 0.15),
+        feature_mode=config.get("feature_mode", "legacy"),
     )
     test_dataset = None
     if config.get("test_ratio", 0.15) > 0:

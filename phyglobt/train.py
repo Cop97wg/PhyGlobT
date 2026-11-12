@@ -156,7 +156,9 @@ def evaluate(model, val_loader, device):
 
 
 def train_one_run(save_dir, train_loader, val_loader, model, criterion,
-                  optimizer, scheduler, num_epochs, patience, device, resume_path=None):
+                  optimizer, scheduler, num_epochs, patience, device, resume_path=None,
+                  extra_meta=None, save_last=False, ot_weight=0.0, ot_sink_mass=None,
+                  coverage_drop=0.0):
     os.makedirs(save_dir, exist_ok=True)
     best_val_f1 = -1.0
     start_epoch = 0
@@ -170,7 +172,7 @@ def train_one_run(save_dir, train_loader, val_loader, model, criterion,
         best_val_f1 = checkpoint.get('f1', -1.0)
         start_epoch = checkpoint.get('epoch', 0) + 1
 
-    for epoch in range(start_epoch, num_epochs):
+    for epoch in range(start_epoch, start_epoch + num_epochs):
         model.train()
         train_loss = 0.0
         n_batches = 0
@@ -182,10 +184,18 @@ def train_one_run(save_dir, train_loader, val_loader, model, criterion,
             mask_A, mask_B = mask_A.to(device), mask_B.to(device)
             if mask_A.sum() == 0 or mask_B.sum() == 0:
                 continue
+            if coverage_drop > 0:
+                keep_b = (torch.rand(mask_B.shape, device=device) >= coverage_drop).float()
+                keep_b = keep_b * mask_B
+                mask_B = keep_b
+                relations = relations * keep_b.unsqueeze(1)
             optimizer.zero_grad()
-            P, logits, aux = model(traj_A, traj_B, ts_A, ts_B, mask_A, mask_B)
+            P, logits, aux = model(traj_A, traj_B, ts_A, ts_B, mask_A, mask_B,
+                                   sink_mass=ot_sink_mass)
             _, _, _, _, phys_A, phys_B = aux
             loss, loss_parts = criterion(logits, relations, mask_A, mask_B, phys_A, phys_B)
+            if ot_weight > 0:
+                loss = loss + ot_weight * ot_plan_loss(P, relations, mask_A, mask_B)
             if torch.isnan(loss):
                 print("Warning: NaN loss, skipping batch")
                 continue
@@ -231,10 +241,54 @@ def train_one_run(save_dir, train_loader, val_loader, model, criterion,
                 'f1': overall_metrics['f1'],
                 'specificity': overall_metrics['specificity'],
                 'level_stats': level_stats,
+                **(extra_meta or {}),
             }, os.path.join(save_dir, 'best_model.pt'))
             print(f"  -> Best model saved (F1={best_val_f1:.4f})")
 
+    if save_last:
+        torch.save({
+            'epoch': epoch,
+            'model_state_dict': model.state_dict(),
+            'best_threshold': best_thresh,
+            'f1': overall_metrics['f1'],
+            'model_config': model.model_config if hasattr(model, 'model_config') else {},
+            'feature_mode': getattr(model, 'feature_mode', 'metric'),
+            'motion_model': getattr(model, 'motion_model', 'cv'),
+            'seed': 42,
+        }, os.path.join(save_dir, 'last_model.pt'))
+
     print(f"\nTraining completed. Best F1: {best_val_f1:.4f}")
+
+
+def ot_plan_loss(P, relations, mask_A, mask_B):
+    """Dustbin-aware cross-entropy on the transport plan.
+
+    Each row of the plan is a distribution over the B tracks plus the sink; rows
+    whose A track has no counterpart are supervised towards the sink, which is
+    what makes the dustbin channel learn an explicit abstention.
+    """
+    total = P.new_tensor(0.0)
+    n_used = 0
+    for b in range(P.shape[0]):
+        keep_a, keep_b = mask_A[b].bool(), mask_B[b].bool()
+        n0, n1 = int(keep_a.sum()), int(keep_b.sum())
+        if n0 < 2 or n1 < 2:
+            continue
+        # columns of P are the B tracks followed by the dustbin, and the valid
+        # tracks need not be contiguous once coverage_drop is active
+        pm = P[b, :, :-1][keep_a][:, keep_b]
+        sink = P[b, :, -1][keep_a]
+        y = relations[b][keep_a][:, keep_b]
+        denom = pm.sum(dim=1) + sink + 1e-8
+        q = ((pm + 1e-8) / denom.unsqueeze(1)).clamp(1e-6, 1.0)
+        q_sink = ((sink + 1e-8) / denom).clamp(1e-6, 1.0 - 1e-6)
+        has = (y.sum(dim=1) > 0.5).float()
+        ll = (y * torch.log(q)).sum()
+        ll = ll + (has * torch.log(1.0 - q_sink)
+                   + (1.0 - has) * torch.log(q_sink)).sum()
+        total = total - ll / max(n0, 1)
+        n_used += 1
+    return total / max(n_used, 1)
 
 
 def parse_args():
@@ -255,7 +309,22 @@ def parse_args():
     parser.add_argument("--use_topology", action="store_true", default=True)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--num_workers", type=int, default=2)
+    parser.add_argument("--feature_mode", type=str, default="metric", choices=["metric", "legacy"],
+                        help="metric: [x,y,vx,vy,t] in physical units; legacy: trigonometric layout")
+    parser.add_argument("--motion_model", type=str, default="cv", choices=["cv", "ca"],
+                        help="kinematic model used by the physics residual encoder")
     parser.add_argument("--resume", type=str, default=None)
+    parser.add_argument("--ot_loss_weight", type=float, default=0.0,
+                        help="weight of the dustbin-aware transport-plan loss (0 disables it)")
+    parser.add_argument("--save_last", action="store_true",
+                        help="also write the final-epoch weights as last_model.pt")
+    parser.add_argument("--ot_sink_mass", type=float, default=0.2,
+                        help="fraction of row mass reserved for the dustbin when the plan is decoded")
+    parser.add_argument("--unbalanced_kappa", type=float, default=1.0,
+                        help="KL-relaxation exponent for the marginals; <1 enables unbalanced OT")
+    parser.add_argument("--coverage_drop", type=float, default=0.0,
+                        help="fraction of B tracks randomly removed per scene so that the "
+                             "dustbin channel sees rows without a counterpart")
     return parser.parse_args()
 
 
@@ -264,6 +333,8 @@ def main():
     set_seed(args.seed)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
+    ot_weight = args.ot_loss_weight
+    ot_sink_mass = args.ot_sink_mass if ot_weight > 0 else None
 
     model_config = {
         'input_dim': 5, 'hidden_dim': 128, 'phys_dim': 64, 'lstm_layers': 2, 'dropout': 0.2,
@@ -271,7 +342,10 @@ def main():
         'topo_dim_feedforward': 256, 'sinkhorn_iters': 20, 'sinkhorn_tau': args.sinkhorn_tau,
         'sinkhorn_epsilon': 1e-3, 'dustbin_cost': 0.0, 'learn_dustbin_cost': False,
         'auto_dustbin_mass': True, 'dustbin_mass_ratio': 0.2, 'sinkhorn_stop_thresh': 1e-5,
+        'unbalanced_kappa': args.unbalanced_kappa,
         'use_transformer_encoder': False,
+        'feature_mode': args.feature_mode,
+        'motion_model': args.motion_model,
     }
 
     data_config = {
@@ -288,6 +362,7 @@ def main():
         'batch_size': args.batch_size,
         'num_workers': args.num_workers,
         'pin_memory': True,
+        'feature_mode': args.feature_mode,
     }
     train_loader, val_loader, _, train_dataset, val_dataset, _ = create_data_loaders(
         args.data_dir, data_config
@@ -318,6 +393,12 @@ def main():
         patience=args.patience,
         device=device,
         resume_path=args.resume,
+        # stored with the checkpoint so evaluation scripts can rebuild the model
+        extra_meta={'model_config': model_config, 'data_config': data_config, 'seed': args.seed},
+        save_last=args.save_last,
+        ot_weight=ot_weight,
+        ot_sink_mass=ot_sink_mass,
+        coverage_drop=args.coverage_drop,
     )
 
 

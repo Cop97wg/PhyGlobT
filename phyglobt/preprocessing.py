@@ -217,3 +217,67 @@ def cartesian_preprocess(trajectory, time_steps=32, use_interpolation=False,
     if return_original_times:
         return features, timestamps
     return features
+
+
+def metric_preprocess(trajectory, time_steps=32, use_interpolation=False,
+                      return_original_times=False, ref_lat=None, ref_lon=None):
+    """Physically meaningful scene-level representation.
+
+    Output features are ``[x, y, vx, vy, t]`` with fixed, invertible scales:
+
+    * ``x``, ``y``   : local east/north offsets in units of 10 km (``x_m / 1e4``)
+    * ``vx``, ``vy`` : velocity in units of 10 m/s (``v_ms / 10``)
+    * ``t``          : relative time in ``[0, 1]``
+
+    The reference point is shared by every track of a scene (scene centre), so
+    absolute geometry is preserved while ``Phy-KRE`` can recover metres and
+    metres-per-second exactly (``pos = [x,y] * 1e4``, ``vel = [vx,vy] * 10``).
+    """
+    if isinstance(trajectory, list):
+        trajectory = np.array(trajectory)
+    if trajectory.shape[1] >= 6:
+        timestamp = trajectory[:, -1].copy()
+        lat, lon = trajectory[:, 0].copy(), trajectory[:, 1].copy()
+        sog, cog = trajectory[:, 2].copy(), trajectory[:, 3].copy()
+    else:
+        timestamp = trajectory[:, 0].copy()
+        lat, lon = trajectory[:, 1].copy(), trajectory[:, 2].copy()
+        sog, cog = trajectory[:, 3].copy(), trajectory[:, 4].copy()
+
+    if ref_lat is None:
+        ref_lat = float(lat[0])
+    if ref_lon is None:
+        ref_lon = float(lon[0])
+    x_m, y_m = latlon_to_meters(lat, lon, ref_lat, ref_lon)
+
+    sog_ms = sog * 0.514444
+    cog_rad = np.radians(cog)
+    vx_ms = sog_ms * np.sin(cog_rad)
+    vy_ms = sog_ms * np.cos(cog_rad)
+
+    span = float(timestamp[-1] - timestamp[0]) if len(timestamp) > 1 else 0.0
+    time_rel = (timestamp - timestamp[0]) / span if span > 1e-6 else np.zeros_like(timestamp)
+
+    features = np.column_stack([x_m / 1e4, y_m / 1e4, vx_ms / 10.0, vy_ms / 10.0,
+                                np.clip(time_rel, 0.0, 1.0)])
+    timestamps = timestamp.copy()
+
+    if len(features) > time_steps:
+        features = features[:time_steps]
+        timestamps = timestamps[:time_steps]
+    elif len(features) < time_steps:
+        if use_interpolation:
+            old_idx = np.arange(len(features))
+            new_idx = np.linspace(0, len(features) - 1, time_steps)
+            features = interp1d(old_idx, features, axis=0, kind="linear")(new_idx)
+            timestamps = interp1d(old_idx, timestamps, kind="linear")(new_idx)
+        else:
+            pad_len = time_steps - len(features)
+            pad = np.tile(features[-1], (pad_len, 1))
+            pad[:, 4] = 1.0  # padded steps hold the final state and normalised time
+            features = np.vstack([features, pad])
+            timestamps = np.concatenate([timestamps, np.full(pad_len, timestamps[-1])])
+
+    if return_original_times:
+        return features, timestamps
+    return features

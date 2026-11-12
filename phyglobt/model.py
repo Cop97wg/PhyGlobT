@@ -23,9 +23,22 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 class PhysicalResidualEncoder(nn.Module):
-    def __init__(self, hidden_dim=64):
+    """Constant-velocity / constant-acceleration kinematic residual encoder.
+
+    ``feature_mode='metric'`` consumes the physical representation produced by
+    :func:`phyglobt.preprocessing.metric_preprocess`, i.e.
+    ``[x/10km, y/10km, vx/(10 m/s), vy/(10 m/s), t]`` and recovers metres and
+    metres-per-second exactly. ``feature_mode='legacy'`` keeps the original
+    trigonometric layout so that previously trained checkpoints still load.
+    """
+
+    def __init__(self, hidden_dim=64, feature_mode='metric', motion_model='cv'):
         super().__init__()
         self.hidden_dim = hidden_dim
+        self.feature_mode = feature_mode
+        self.motion_model = motion_model
+        self.pos_scale = 1e4   # 10 km -> m
+        self.vel_scale = 10.0  # 10 m/s -> m/s
         self.proj = nn.Sequential(
             nn.Linear(4, hidden_dim),
             nn.ReLU(),
@@ -37,32 +50,47 @@ class PhysicalResidualEncoder(nn.Module):
         if T < 2:
             return torch.zeros(B, N, self.hidden_dim, device=traj.device)
 
-        pos = traj[..., :2]
-        sog = traj[..., 2:3]
-        cog = traj[..., 3:4]
-        cog_rad = cog * torch.pi / 180.0
-        vx = sog * torch.cos(cog_rad)
-        vy = sog * torch.sin(cog_rad)
-        vel = torch.cat([vx, vy], dim=-1)
+        if self.feature_mode == 'metric':
+            pos = traj[..., 0:2] * self.pos_scale
+            vel = traj[..., 2:4] * self.vel_scale
+        else:
+            pos = traj[..., :2]
+            sog = traj[..., 2:3]
+            cog = traj[..., 3:4]
+            cog_rad = cog * torch.pi / 180.0
+            vel = torch.cat([sog * torch.cos(cog_rad), sog * torch.sin(cog_rad)], dim=-1)
 
         dt = timestamps[..., 1:] - timestamps[..., :-1]
-        dt_exp = dt.unsqueeze(-1)
+        dt_safe = dt.clamp_min(1.0)  # padding has dt = 0
+        dt_exp = dt_safe.unsqueeze(-1)
 
-        pos_cur = pos[..., :-1, :]
-        pos_next = pos[..., 1:, :]
-        vel_cur = vel[..., :-1, :]
-        pos_pred = pos_cur + vel_cur * dt_exp
-        pos_res = pos_next - pos_pred
+        # acceleration at step t from the previous velocity difference
+        acc = torch.zeros_like(vel)
+        if vel.shape[-2] > 2:
+            acc[..., 1:-1, :] = (vel[..., 1:-1, :] - vel[..., :-2, :]) / dt_safe[..., :-1].unsqueeze(-1)
 
-        vel_next = vel[..., 1:, :]
-        vel_res = vel_next - vel_cur
+        pos_cur, pos_next = pos[..., :-1, :], pos[..., 1:, :]
+        vel_cur, vel_next = vel[..., :-1, :], vel[..., 1:, :]
+        acc_cur = acc[..., :-1, :]
 
-        residual = torch.cat([pos_res, vel_res], dim=-1)
-        residual_pooled = residual.mean(dim=2)
+        if self.motion_model == 'ca':
+            pos_pred = pos_cur + vel_cur * dt_exp + 0.5 * acc_cur * dt_exp ** 2
+            vel_pred = vel_cur + acc_cur * dt_exp
+        else:
+            pos_pred = pos_cur + vel_cur * dt_exp
+            vel_pred = vel_cur
+
+        residual = torch.cat([pos_next - pos_pred, vel_next - vel_pred], dim=-1)
+        if self.feature_mode == 'metric':
+            # padded steps carry dt = 0; drop them so short tracks are not diluted
+            valid = (dt > 0).float().unsqueeze(-1)
+            residual_pooled = (residual * valid).sum(dim=2) / valid.sum(dim=2).clamp_min(1.0)
+        else:
+            residual_pooled = residual.mean(dim=2)
         residual_pooled = torch.nan_to_num(residual_pooled, nan=0.0, posinf=1.0, neginf=-1.0)
-        residual_pooled = torch.clamp(residual_pooled, -5.0, 5.0)
-        feat = self.proj(residual_pooled)
-        return feat
+        limit = 100.0 if self.feature_mode == 'metric' else 5.0  # metres vs normalised units
+        residual_pooled = torch.clamp(residual_pooled, -limit, limit)
+        return self.proj(residual_pooled)
 
 
 class TrajectoryFeatureEncoder(nn.Module):
@@ -201,7 +229,7 @@ class UnbalancedSinkhornSolver(nn.Module):
     def __init__(self, num_iters=20, tau=1.0, epsilon=1e-3,
                  dustbin_cost=0.0, learn_dustbin_cost=False,
                  dustbin_mass_ratio=0.2, auto_dustbin_mass=True,
-                 stop_thresh=1e-5):
+                 stop_thresh=1e-5, unbalanced_kappa=1.0):
         super().__init__()
         self.num_iters = num_iters
         self.tau = tau
@@ -209,13 +237,14 @@ class UnbalancedSinkhornSolver(nn.Module):
         self.stop_thresh = stop_thresh
         self.auto_dustbin_mass = auto_dustbin_mass
         self.dustbin_mass_ratio = dustbin_mass_ratio
+        self.unbalanced_kappa = unbalanced_kappa
         
         if learn_dustbin_cost:
             self.dustbin_cost = nn.Parameter(torch.tensor(dustbin_cost, dtype=torch.float32))
         else:
             self.register_buffer('dustbin_cost', torch.tensor(dustbin_cost, dtype=torch.float32))
 
-    def forward(self, logits, mask0=None, mask1=None):
+    def forward(self, logits, mask0=None, mask1=None, sink_mass=None):
         B, N0, N1 = logits.shape
         device = logits.device
         
@@ -236,7 +265,12 @@ class UnbalancedSinkhornSolver(nn.Module):
         a = a * mask0
         b = b * mask1
         
-        if self.auto_dustbin_mass:
+        if sink_mass is not None:
+            dustbin_mass_a = torch.full((B,), float(sink_mass), device=device)
+            dustbin_mass_b = torch.full((B,), float(sink_mass), device=device)
+            a = a * (1.0 - dustbin_mass_a.unsqueeze(1))
+            b = b * (1.0 - dustbin_mass_b.unsqueeze(1))
+        elif self.auto_dustbin_mass:
             dustbin_mass_a = 1.0 - a.sum(dim=1)
             dustbin_mass_b = 1.0 - b.sum(dim=1)
             dustbin_mass_a = torch.clamp(dustbin_mass_a, min=0.0)
@@ -264,18 +298,24 @@ class UnbalancedSinkhornSolver(nn.Module):
         for i in range(self.num_iters):
             Kv = torch.matmul(K, v.unsqueeze(-1)).squeeze(-1)
             u_new = a_ext / (Kv + 1e-12)
+            if self.unbalanced_kappa < 1.0:
+                u_new = u_new.clamp(min=1e-12) ** self.unbalanced_kappa
             u_new = torch.nan_to_num(u_new, nan=1.0, posinf=1.0, neginf=1.0)
             
             KTu = torch.matmul(K.transpose(1, 2), u_new.unsqueeze(-1)).squeeze(-1)
             v_new = b_ext / (KTu + 1e-12)
+            if self.unbalanced_kappa < 1.0:
+                v_new = v_new.clamp(min=1e-12) ** self.unbalanced_kappa
             v_new = torch.nan_to_num(v_new, nan=1.0, posinf=1.0, neginf=1.0)
             
             u, v = u_new, v_new
         
         P_ext = u.unsqueeze(-1) * K * v.unsqueeze(1)
         P_ext = torch.clamp(P_ext, 0.0, 1.0)
-        P = P_ext[:, :N0, :N1]
-        P = P * mask0.unsqueeze(-1) * mask1.unsqueeze(1)
+        block = P_ext[:, :N0, :N1] * mask0.unsqueeze(-1) * mask1.unsqueeze(1)
+        # keep the dustbin column as the last entry so that downstream losses can
+        # see how much mass each row abstains with
+        P = torch.cat([block, P_ext[:, :N0, N1:N1 + 1]], dim=-1)
         P = torch.nan_to_num(P, nan=0.0)
         return P
 
@@ -294,7 +334,10 @@ class PhysiTrackModel(nn.Module):
         topo_dim_feedforward = config.get('topo_dim_feedforward', 256)
 
         self.use_topology = use_topology
-        self.phys_encoder = PhysicalResidualEncoder(phys_dim)
+        self.feature_mode = config.get('feature_mode', 'legacy')
+        self.motion_model = config.get('motion_model', 'cv')
+        self.phys_encoder = PhysicalResidualEncoder(
+            phys_dim, feature_mode=self.feature_mode, motion_model=self.motion_model)
 
         # 编码器选择: LSTM (默认) 或 Transformer
         self.use_transformer_encoder = config.get('use_transformer_encoder', False)
@@ -335,7 +378,8 @@ class PhysiTrackModel(nn.Module):
             learn_dustbin_cost=config.get('learn_dustbin_cost', False),
             auto_dustbin_mass=config.get('auto_dustbin_mass', True),
             dustbin_mass_ratio=config.get('dustbin_mass_ratio', 0.2),
-            stop_thresh=config.get('sinkhorn_stop_thresh', 1e-5)
+            stop_thresh=config.get('sinkhorn_stop_thresh', 1e-5),
+            unbalanced_kappa=config.get('unbalanced_kappa', 1.0)
         )
 
     def _make_legacy_cost_predictor(self, feat_dim, phys_dim, hidden_dim):
@@ -358,7 +402,7 @@ class PhysiTrackModel(nn.Module):
                 return torch.clamp(logits, -20.0, 20.0)
         return LegacyCostPredictor(feat_dim, phys_dim, hidden_dim)
 
-    def forward(self, traj_A, traj_B, timestamps_A, timestamps_B, mask_A, mask_B):
+    def forward(self, traj_A, traj_B, timestamps_A, timestamps_B, mask_A, mask_B, sink_mass=None):
         traj_A = torch.nan_to_num(traj_A, nan=0.0, posinf=10.0, neginf=-10.0)
         traj_B = torch.nan_to_num(traj_B, nan=0.0, posinf=10.0, neginf=-10.0)
         timestamps_A = torch.nan_to_num(timestamps_A, nan=0.0)
@@ -393,7 +437,7 @@ class PhysiTrackModel(nn.Module):
         logits = logits.masked_fill(~mask_A_bool.unsqueeze(-1), -1e9)
         logits = logits.masked_fill(~mask_B_bool.unsqueeze(1), -1e9)
 
-        P = self.sinkhorn(logits, mask_A.float(), mask_B.float())
+        P = self.sinkhorn(logits, mask_A.float(), mask_B.float(), sink_mass=sink_mass)
         aux = (fused_A, fused_B, feat_A, feat_B, phys_A, phys_B)
         return P, logits, aux
 
