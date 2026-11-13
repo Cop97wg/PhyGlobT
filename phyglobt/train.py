@@ -189,6 +189,8 @@ def train_one_run(save_dir, train_loader, val_loader, model, criterion,
                 keep_b = keep_b * mask_B
                 mask_B = keep_b
                 relations = relations * keep_b.unsqueeze(1)
+                if mask_B.sum() == 0:
+                    continue
             optimizer.zero_grad()
             P, logits, aux = model(traj_A, traj_B, ts_A, ts_B, mask_A, mask_B,
                                    sink_mass=ot_sink_mass)
@@ -251,10 +253,7 @@ def train_one_run(save_dir, train_loader, val_loader, model, criterion,
             'model_state_dict': model.state_dict(),
             'best_threshold': best_thresh,
             'f1': overall_metrics['f1'],
-            'model_config': model.model_config if hasattr(model, 'model_config') else {},
-            'feature_mode': getattr(model, 'feature_mode', 'metric'),
-            'motion_model': getattr(model, 'motion_model', 'cv'),
-            'seed': 42,
+            **(extra_meta or {}),
         }, os.path.join(save_dir, 'last_model.pt'))
 
     print(f"\nTraining completed. Best F1: {best_val_f1:.4f}")

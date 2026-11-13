@@ -510,6 +510,10 @@ def physical_consistency_loss(phys_A, phys_B, Y, mask_A, mask_B):
         pos_loss = pos_loss / pos_count
     if neg_count > 0:
         neg_loss = neg_loss / neg_count
+    if pos_count == 0 and neg_count == 0:
+        # no valid pair in this batch (e.g. every B track was dropped): keep the
+        # term differentiable instead of returning a plain float
+        return phys_A.sum() * 0.0
     return pos_loss + 0.1 * neg_loss
 
 

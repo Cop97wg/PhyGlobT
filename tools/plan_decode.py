@@ -77,6 +77,8 @@ def main():
     ap.add_argument('--max_scenes', type=int, default=300)
     ap.add_argument('--drop_ratio', type=float, default=0.1)
     ap.add_argument('--seed', type=int, default=42)
+    ap.add_argument('--split', default='all', choices=['all', 'val'],
+                    help="'val' = the 20% hold-out split used during training")
     ap.add_argument('--kappa', type=float, default=None,
                     help="override the KL-relaxation exponent (<1 = unbalanced OT)")
     args = ap.parse_args()
@@ -87,7 +89,8 @@ def main():
         model.sinkhorn.unbalanced_kappa = float(args.kappa)
     tau = float(ckpt.get('best_threshold', 0.5))
     ds = make_dataset(args.data_dir, cfg.get('max_trajectories', 256),
-                      cfg.get('time_steps', 32), feature_mode=cfg.get('feature_mode', 'legacy'))
+                      cfg.get('time_steps', 32), feature_mode=cfg.get('feature_mode', 'legacy'),
+                      split=args.split)
     loader = DataLoader(ds, batch_size=1, shuffle=False, num_workers=0,
                         collate_fn=cross_sensor_collate_fn)
     g = torch.Generator().manual_seed(args.seed)
