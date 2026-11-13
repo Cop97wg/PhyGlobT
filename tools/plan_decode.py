@@ -81,6 +81,9 @@ def main():
                     help="'val' = the 20% hold-out split used during training")
     ap.add_argument('--kappa', type=float, default=None,
                     help="override the KL-relaxation exponent (<1 = unbalanced OT)")
+    ap.add_argument('--dump_scene', action='store_true',
+                    help="store per-scene tp/fp/fn and the McNemar table for "
+                         "paired significance tests")
     args = ap.parse_args()
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -102,6 +105,8 @@ def main():
 
     orphan = {k: [0.0, 0.0] for k in [f'plan_rho{r}_d{d}' for r in RHOS for d in DELTAS]
               + ['threshold']}
+    per_scene = []
+    mcnemar = {f'plan_rho{r}_d{d}': [0, 0] for r in RHOS for d in DELTAS}
     n_done = 0
 
     with torch.no_grad():
@@ -122,13 +127,24 @@ def main():
             # (a) per-pair threshold, the rule used in the manuscript
             pred_thr = (torch.sigmoid(logits)[0, :n0, :n1] > tau).float()
             add('threshold', *_counts(pred_thr, rel_s, valid))
+            scene = {'threshold': list(_counts(pred_thr, rel_s, valid))}
+            if args.dump_scene:
+                thr_hit = ((pred_thr > 0.5) == (rel_s > 0.5)) * valid
 
             # (b) plan decoding under several sink masses
             for rho in RHOS:
                 plan = model.sinkhorn(logits, ma, mb, sink_mass=rho)[0]
                 for d in DELTAS:
                     pred = _decode_plan(plan, n0, n1, d)
-                    add(f'plan_rho{rho}_d{d}', *_counts(pred, rel_s, valid))
+                    k = f'plan_rho{rho}_d{d}'
+                    add(k, *_counts(pred, rel_s, valid))
+                    if args.dump_scene:
+                        scene[k] = list(_counts(pred, rel_s, valid))
+                        plan_hit = ((pred > 0.5) == (rel_s > 0.5)) * valid
+                        mcnemar[k][0] += int((~thr_hit.bool() & plan_hit.bool()).sum())
+                        mcnemar[k][1] += int((thr_hit.bool() & ~plan_hit.bool()).sum())
+            if args.dump_scene:
+                per_scene.append(scene)
 
             # (c) partial coverage: remove a fraction of the B tracks
             keep_b = (torch.rand(n1, generator=g) >= args.drop_ratio).to(device)
@@ -165,6 +181,9 @@ def main():
         'orphan_false_link': {k: (v[0] / max(v[1], 1)) for k, v in orphan.items()},
         'orphan_counts': {k: v for k, v in orphan.items()},
     }
+    if args.dump_scene:
+        report['per_scene'] = per_scene
+        report['mcnemar'] = mcnemar
     with open(args.out, 'w', encoding='utf-8') as f:
         json.dump(report, f, indent=2)
     print(json.dumps({k: round(v['f1'], 4) for k, v in report['full'].items()}, indent=1))
